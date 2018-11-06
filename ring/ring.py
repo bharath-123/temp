@@ -44,11 +44,11 @@ def calc_replica_count(replica2part2dev_id):
 class RingData(object):
     """Partitioned consistent hashing ring data (used for serialization)."""
 
-    def __init__(self, replica2part2dev_id, devs, part_shift, ssd_disks,
+    def __init__(self, replica2part2dev_id, devs, part_shift,
                  next_part_power=None):
-        self.devs = devs  # device dict
-        self._replica2part2dev_id = replica2part2dev_id  # 2D array
-        self._part_shift = part_shift  # how much to shift the hash by to get the partition bits
+        self.devs = devs
+        self._replica2part2dev_id = replica2part2dev_id
+        self._part_shift = part_shift
         self.next_part_power = next_part_power
 
         for dev in self.devs:
@@ -83,25 +83,13 @@ class RingData(object):
 
         if metadata_only:
             return ring_dict
-        '''
-        Added by me:
-        This checks whether the byte order(little endian or big endian) of the ring file is
-        the same as that of the server processor. If not we reverse the bytes
-        '''
+
         byteswap = (ring_dict.get('byteorder', sys.byteorder) != sys.byteorder)
-        print("byte order is {}".format(ring_dict.get('byteorder')))
-        '''
-        Added by me:
-        The number of partitions present(1024 or 2**10). 10 is the part power
-        '''
+
         partition_count = 1 << (32 - ring_dict['part_shift'])
         for x in range(ring_dict['replica_count']):
             part2dev = array.array('H', gz_file.read(2 * partition_count))
             if byteswap:
-                '''
-                Added by me:
-                Change the byte order if wrong
-                '''
                 part2dev.byteswap()
             ring_dict['replica2part2dev_id'].append(part2dev)
 
@@ -137,7 +125,6 @@ class RingData(object):
             ring_data = RingData(ring_data['replica2part2dev_id'],
                                  ring_data['devs'], ring_data['part_shift'],
                                  ring_data.get('next_part_power'))
-        print("The data in the ring is {}".format(ring_data.devs))
         return ring_data
 
     def serialize_v1(self, file_obj):
@@ -214,31 +201,13 @@ class Ring(object):
             self.serialized_path = os.path.join(serialized_path)
         self.reload_time = reload_time
         self._validation_hook = validation_hook
-        '''
-        Added by me:
-        ring is reloaded when it is instansiated in storage_policies.py
-        '''
         self._reload(force=True)
 
     def _reload(self, force=False):
-        '''
-        Added by me:
-        This will reload the ring objects if it has been changed. It checks every 15 secs.
-        All the values like self._replica2dev2id ,self._dev will be assigned here.  They are not
-        assigned in the constructor
-        '''
         self._rtime = time() + self.reload_time
         if force or self.has_changed():
-            '''
-            Added by me:
-            if we force it then proceed otherwise check if the ring has been changed by comparing the timestamp
-            of the ring file(using os module) with the timestamp of the Ring Object.
-            '''
-            '''
-            Added by me:
-            Load the ring data from the ring data object
-            '''
             ring_data = RingData.load(self.serialized_path)
+
             try:
                 self._validation_hook(ring_data)
             except RingLoadError:
@@ -248,12 +217,10 @@ class Ring(object):
                     # In runtime reload at working server, it's ok to use old
                     # ring data if the new ring data is invalid.
                     return
-            '''
-            Added by me:
-            Update the timestamp of the ring object
-            '''
+
             self._mtime = getmtime(self.serialized_path)
             self._devs = ring_data.devs
+            print("The devices are {}".format(self._devs))
             # NOTE(akscram): Replication parameters like replication_ip
             #                and replication_port are required for
             #                replication process. An old replication
@@ -270,7 +237,7 @@ class Ring(object):
 
             self._replica2part2dev_id = ring_data._replica2part2dev_id
             self._part_shift = ring_data._part_shift
-            self._rebuild_tier_data()  # idk what this is
+            self._rebuild_tier_data()
 
             # Do this now, when we know the data has changed, rather than
             # doing it on every call to get_more_nodes().
@@ -389,10 +356,6 @@ class Ring(object):
         """
 
         if time() > self._rtime:
-            '''
-            Added by me:
-            Check if the ring is renewed every 15 secs
-            '''
             self._reload()
         return self._get_part_nodes(part)
 
@@ -425,8 +388,6 @@ class Ring(object):
                 hardware description
         ======  ===============================================================
         """
-        print("serialized_path is {}".format(self.serialized_path))
-        #  print("RING DS is {}".format(len(self._replica2part2dev_id[0])))
         part = self.get_part(account, container, obj)
         return part, self._get_part_nodes(part)
 
@@ -444,48 +405,23 @@ class Ring(object):
 
         See :func:`get_nodes` for a description of the node dicts.
         """
-        print("---------------------------------------------------------------In get more nodes-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------")
         if time() > self._rtime:
-            '''
-            Added by me:
-            Reload every 15 secs
-            '''
             self._reload()
-        '''
-        added by me:
-        get the primary nodes which are mapped to the particular partition regardless of whether the node is working or not
-        '''
+        print("Gtting handoff now!983029382109381")
         primary_nodes = self._get_part_nodes(part)
-        '''
-        Added by me:
-        These are the devices which are used
-        '''
+
         used = set(d['id'] for d in primary_nodes)
         same_regions = set(d['region'] for d in primary_nodes)
         same_zones = set((d['region'], d['zone']) for d in primary_nodes)
         same_ips = set(
             (d['region'], d['zone'], d['ip']) for d in primary_nodes)
-        print("Used is {}".format(used))
-        print("same regions is {}".format(same_regions))
-        print("same zones is {}".format(same_zones))
-        print("same ips is {}".format(same_ips))
-        '''
-        Added by me:
-        Why did they do this????
-        '''
+
         parts = len(self._replica2part2dev_id[0])
-        print("Parts : {}".format(parts))
         part_hash = md5(str(part).encode('ascii')).digest()
         start = struct.unpack_from('>I', part_hash)[0] >> self._part_shift
-        print("part_shift is {}".format(self._part_shift))
-        print("start is {}".format(start))
         inc = int(parts / 65536) or 1
         # Multiple loops for execution speed; the checks and bookkeeping get
         # simpler as you go along
-        '''
-        Added by me:
-        The placement algorithm begins
-        '''
         hit_all_regions = len(same_regions) == self._num_regions
         for handoff_part in chain(range(start, parts, inc),
                                   range(inc - ((parts - start) % inc),
@@ -494,13 +430,12 @@ class Ring(object):
                 # At this point, there are no regions left untouched, so we
                 # can stop looking.
                 break
-            print("In hit all regions")
             for part2dev_id in self._replica2part2dev_id:
                 if handoff_part < len(part2dev_id):
                     dev_id = part2dev_id[handoff_part]
                     dev = self._devs[dev_id]
                     region = dev['region']
-                    if dev_id not in used and region not in same_regions:
+                    if dev_id not in used and region not in same_regions and dev['disk_type'] == 'ssd':
                         yield dev
                         used.add(dev_id)
                         same_regions.add(region)
@@ -520,28 +455,18 @@ class Ring(object):
                 # Much like we stopped looking for fresh regions before, we
                 # can now stop looking for fresh zones; there are no more.
                 break
-            print("in hit all zones")
             for part2dev_id in self._replica2part2dev_id:
                 if handoff_part < len(part2dev_id):
-                    '''
-                    Added by me:
-                    A partition is present on 3 devices, we are checking whether the handoff partition can be used on any one of the devices
-                    '''
                     dev_id = part2dev_id[handoff_part]
                     dev = self._devs[dev_id]
                     zone = (dev['region'], dev['zone'])
-                    if dev_id not in used and zone not in same_zones:
+                    if dev_id not in used and zone not in same_zones and dev['disk_type'] == 'ssd':
                         yield dev
-                        print("after yield dev in hit all zones")
-                        '''
-                        Added by me:
-                        Goes here if multiple hand off nodes are required
-                        '''
-                        used.add(dev_id)  # add to used devices
-                        same_zones.add(zone)  # add to same_zones i.e the zone has been used
-                        ip = zone + (dev['ip'],)  # add to same_ips i.e the ip has been used
-                        same_ips.add(ip)  # add to same_ips
-                        if len(same_zones) == self._num_zones:  # if all zones are used then we hit all zones, that means cannot place the replica uniquely
+                        used.add(dev_id)
+                        same_zones.add(zone)
+                        ip = zone + (dev['ip'],)
+                        same_ips.add(ip)
+                        if len(same_zones) == self._num_zones:
                             hit_all_zones = True
                             break
 
@@ -554,12 +479,11 @@ class Ring(object):
                 # looking.
                 break
             for part2dev_id in self._replica2part2dev_id:
-                print("in hit all ips")
                 if handoff_part < len(part2dev_id):
                     dev_id = part2dev_id[handoff_part]
                     dev = self._devs[dev_id]
                     ip = (dev['region'], dev['zone'], dev['ip'])
-                    if dev_id not in used and ip not in same_ips:
+                    if dev_id not in used and ip not in same_ips and dev['disk_type'] == 'ssd':
                         yield dev
                         used.add(dev_id)
                         same_ips.add(ip)
