@@ -21,7 +21,6 @@ import logging
 import math
 import random
 import uuid
-import subprocess
 
 import six.moves.cPickle as pickle
 from copy import deepcopy
@@ -101,7 +100,6 @@ class RingBuilder(object):
         self.min_part_hours = min_part_hours
         self.parts = 2 ** self.part_power
         self.devs = []
-        self.ssd_disks = []
         self.devs_changed = False
         self.version = 0
         self.overload = 0.0
@@ -204,7 +202,7 @@ class RingBuilder(object):
         """
         try:
             return self.parts * self.replicas / \
-                sum(d['weight'] for d in self._iter_devs() if d['disk_type'] != 'ssd')
+                sum(d['weight'] for d in self._iter_devs())
         except ZeroDivisionError:
             raise exceptions.EmptyRingError('There are no devices in this '
                                             'ring, or all devices have been '
@@ -359,8 +357,8 @@ class RingBuilder(object):
             # builder-specific extra attributes.
             devs = [None] * len(self.devs)
             for dev in self._iter_devs():
-                    devs[dev['id']] = dict((k, v) for k, v in dev.items()
-                                           if k not in ('parts', 'parts_wanted'))
+                devs[dev['id']] = dict((k, v) for k, v in dev.items()
+                                       if k not in ('parts', 'parts_wanted'))
             # Copy over the replica+partition->device assignments, the device
             # information, and the part_shift value (the number of bits to
             # shift an unsigned int >I right to obtain the partition for the
@@ -424,33 +422,18 @@ class RingBuilder(object):
             raise ValueError(
                 '%r is missing at least one the required key %r' % (
                     dev, required_keys))
-        dev['weight'] = float(dev['weight'])
-        dev['parts'] = 0
-        '''
-        Added by me:
-        We can add an extra field like type to distinguish between ssd and hdd
-        '''
-        #if device is a parition check the rotational value of the main device
-        #check if dev is partition
-        device = dev["device"]
-        if device == 'sdb1':
+
+        if dev['device'] == 'sdb1':
             dev['disk_type'] = 'ssd'
         else:
             dev['disk_type'] = 'hdd'
-        '''
-        Added by me:
-        Keep ssds in seperate list rather than part of the ring
-        '''
+        dev['weight'] = float(dev['weight'])
+        dev['parts'] = 0
         dev.setdefault('meta', '')
         self.devs[dev['id']] = dev
         self.devs_changed = True
         self.version += 1
-        print("The device list is {}".format(self.devs))
         return dev['id']
-
-    @staticmethod
-    def has_number(string):
-        return any(char.isdigit() for char in string)
 
     def set_dev_weight(self, dev_id, weight):
         """
@@ -508,14 +491,11 @@ class RingBuilder(object):
                    number_of_removed_devices)
         """
         # count up the devs, and cache some stuff
-        #import pdb
-        #pdb.set_trace()
         num_devices = 0
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                dev['tiers'] = tiers_for_dev(dev)
-                if dev['weight'] > 0:
-                    num_devices += 1
+            dev['tiers'] = tiers_for_dev(dev)
+            if dev['weight'] > 0:
+                num_devices += 1
         if num_devices < self.replicas:
             raise exceptions.RingValidationError(
                 "Replica count of %(replicas)s requires more "
@@ -536,7 +516,7 @@ class RingBuilder(object):
         with _set_random_seed(seed):
             replica_plan = self._build_replica_plan()
             self._set_parts_wanted(replica_plan)
-            print("Replica plan is {}".format(replica_plan))
+
             assign_parts = defaultdict(list)
             # gather parts from replica count adjustment
             self._adjust_replica2part2dev_size(assign_parts)
@@ -568,7 +548,7 @@ class RingBuilder(object):
                 self.logger.debug("Assigned %d parts", num_part_replicas)
 
                 if not sum(d['parts_wanted'] < 0 for d in
-                           self._iter_devs() if d['disk_type'] != 'ssd'):
+                           self._iter_devs()):
                     finish_status = 'Finished'
                     break
             else:
@@ -582,8 +562,8 @@ class RingBuilder(object):
 
         # clean up the cache
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                dev.pop('tiers', None)
+            dev.pop('tiers', None)
+
         return changed_parts, self.get_balance(), removed_devs
 
     def _build_dispersion_graph(self, old_replica2part2dev=None):
@@ -685,7 +665,7 @@ class RingBuilder(object):
         # "len" showed up in profiling, so it's just computed once.
         dev_len = len(self.devs)
 
-        parts_on_devs = sum(d['parts'] for d in self._iter_devs() if d['disk_type'] != 'ssd')
+        parts_on_devs = sum(d['parts'] for d in self._iter_devs())
 
         if not self._replica2part2dev:
             raise exceptions.RingValidationError(
@@ -705,11 +685,10 @@ class RingBuilder(object):
                     dev_usage[dev_id] += 1
 
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                if not isinstance(dev['port'], int):
-                    raise exceptions.RingValidationError(
-                        "Device %d has port %r, which is not an integer." %
-                        (dev['id'], dev['port']))
+            if not isinstance(dev['port'], int):
+                raise exceptions.RingValidationError(
+                    "Device %d has port %r, which is not an integer." %
+                    (dev['id'], dev['port']))
 
         int_replicas = int(math.ceil(self.replicas))
         rep2part_len = list(map(len, self._replica2part2dev))
@@ -747,20 +726,19 @@ class RingBuilder(object):
             weight_of_one_part = self.weight_of_one_part()
             worst = 0
             for dev in self._iter_devs():
-                if dev['disk_type'] != 'ssd':
-                    if not dev['weight']:
-                        if dev_usage[dev['id']]:
-                            # If a device has no weight, but has partitions, then
-                            # its overage is considered "infinity" and therefore
-                            # always the worst possible. We show MAX_BALANCE for
-                            # convenience.
-                            worst = MAX_BALANCE
-                            break
-                        continue
-                    skew = abs(100.0 * dev_usage[dev['id']] /
-                               (dev['weight'] * weight_of_one_part) - 100.0)
-                    if skew > worst:
-                        worst = skew
+                if not dev['weight']:
+                    if dev_usage[dev['id']]:
+                        # If a device has no weight, but has partitions, then
+                        # its overage is considered "infinity" and therefore
+                        # always the worst possible. We show MAX_BALANCE for
+                        # convenience.
+                        worst = MAX_BALANCE
+                        break
+                    continue
+                skew = abs(100.0 * dev_usage[dev['id']] /
+                           (dev['weight'] * weight_of_one_part) - 100.0)
+                if skew > worst:
+                    worst = skew
             return dev_usage, worst
         return None, None
 
@@ -776,19 +754,18 @@ class RingBuilder(object):
         weight_of_one_part = self.weight_of_one_part()
         balance_per_dev = {}
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                if not dev['weight']:
-                    if dev['parts']:
-                        # If a device has no weight, but has partitions, then its
-                        # overage is considered "infinity" and therefore always the
-                        # worst possible. We show MAX_BALANCE for convenience.
-                        balance = MAX_BALANCE
-                    else:
-                        balance = 0
+            if not dev['weight']:
+                if dev['parts']:
+                    # If a device has no weight, but has partitions, then its
+                    # overage is considered "infinity" and therefore always the
+                    # worst possible. We show MAX_BALANCE for convenience.
+                    balance = MAX_BALANCE
                 else:
-                    balance = 100.0 * dev['parts'] / (
-                        dev['weight'] * weight_of_one_part) - 100.0
-                balance_per_dev[dev['id']] = balance
+                    balance = 0
+            else:
+                balance = 100.0 * dev['parts'] / (
+                    dev['weight'] * weight_of_one_part) - 100.0
+            balance_per_dev[dev['id']] = balance
         return balance_per_dev
 
     def get_balance(self):
@@ -820,23 +797,22 @@ class RingBuilder(object):
         wanted = wanted or self._build_wanted_replicas_by_tier()
         max_overload = 0.0
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                tier = (dev['region'], dev['zone'], dev['ip'], dev['id'])
-                if not dev['weight']:
-                    if tier not in wanted or not wanted[tier]:
-                        continue
-                    raise exceptions.RingValidationError(
-                        'Device %s has zero weight and '
-                        'should not want any replicas' % (tier,))
-                required = (wanted[tier] - weighted[tier]) / weighted[tier]
-                self.logger.debug('%(tier)s wants %(wanted)s and is weighted for '
-                                  '%(weight)s so therefore requires %(required)s '
-                                  'overload', {'tier': pretty_dev(dev),
-                                               'wanted': wanted[tier],
-                                               'weight': weighted[tier],
-                                               'required': required})
-                if required > max_overload:
-                    max_overload = required
+            tier = (dev['region'], dev['zone'], dev['ip'], dev['id'])
+            if not dev['weight']:
+                if tier not in wanted or not wanted[tier]:
+                    continue
+                raise exceptions.RingValidationError(
+                    'Device %s has zero weight and '
+                    'should not want any replicas' % (tier,))
+            required = (wanted[tier] - weighted[tier]) / weighted[tier]
+            self.logger.debug('%(tier)s wants %(wanted)s and is weighted for '
+                              '%(weight)s so therefore requires %(required)s '
+                              'overload', {'tier': pretty_dev(dev),
+                                           'wanted': wanted[tier],
+                                           'weight': weighted[tier],
+                                           'required': required})
+            if required > max_overload:
+                max_overload = required
         return max_overload
 
     def pretend_min_part_hours_passed(self):
@@ -873,14 +849,14 @@ class RingBuilder(object):
         dev_id.
         """
         for dev in self.devs:
-            if dev is not None:
+            if (dev is not None):
                 yield dev
 
     def _build_tier2children(self):
         """
         Wrap helper build_tier_tree so exclude zero-weight devices.
         """
-        return build_tier_tree(d for d in self._iter_devs() if d['weight'] and d['disk_type'] != 'ssd')
+        return build_tier_tree(d for d in self._iter_devs() if d['weight'])
 
     def _set_parts_wanted(self, replica_plan):
         """
@@ -935,15 +911,14 @@ class RingBuilder(object):
                         parts_at_tier, total_parts, tier_name))
 
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                if not dev['weight']:
-                    # With no weight, that means we wish to "drain" the device. So
-                    # we set the parts_wanted to a really large negative number to
-                    # indicate its strong desire to give up everything it has.
-                    dev['parts_wanted'] = -self.parts * self.replicas
-                else:
-                    tier = (dev['region'], dev['zone'], dev['ip'], dev['id'])
-                    dev['parts_wanted'] = parts_by_tier[tier] - dev['parts']
+            if not dev['weight']:
+                # With no weight, that means we wish to "drain" the device. So
+                # we set the parts_wanted to a really large negative number to
+                # indicate its strong desire to give up everything it has.
+                dev['parts_wanted'] = -self.parts * self.replicas
+            else:
+                tier = (dev['region'], dev['zone'], dev['ip'], dev['id'])
+                dev['parts_wanted'] = parts_by_tier[tier] - dev['parts']
 
     def _update_last_part_moves(self):
         """
@@ -1130,10 +1105,9 @@ class RingBuilder(object):
         tier2children = self._build_tier2children()
         parts_wanted_in_tier = defaultdict(int)
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                wanted = max(dev['parts_wanted'], 0)
-                for tier in dev['tiers']:
-                    parts_wanted_in_tier[tier] += wanted
+            wanted = max(dev['parts_wanted'], 0)
+            for tier in dev['tiers']:
+                parts_wanted_in_tier[tier] += wanted
         # Last, we gather partitions from devices that are "overweight" because
         # they have more partitions than their parts_wanted.
         for offset in range(self.parts):
@@ -1288,25 +1262,24 @@ class RingBuilder(object):
         """
         parts_available_in_tier = defaultdict(int)
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                dev['sort_key'] = self._sort_key_for(dev)
-                # Note: this represents how many partitions may be assigned to a
-                # given tier (region/zone/server/disk). It does not take into
-                # account how many partitions a given tier wants to shed.
-                #
-                # If we did not do this, we could have a zone where, at some
-                # point during an assignment, number-of-parts-to-gain equals
-                # number-of-parts-to-shed. At that point, no further placement
-                # into that zone would occur since its parts_available_in_tier
-                # would be 0. This would happen any time a zone had any device
-                # with partitions to shed, which is any time a device is being
-                # removed, which is a pretty frequent operation.
-                wanted = max(dev['parts_wanted'], 0)
-                for tier in dev['tiers']:
-                    parts_available_in_tier[tier] += wanted
+            dev['sort_key'] = self._sort_key_for(dev)
+            # Note: this represents how many partitions may be assigned to a
+            # given tier (region/zone/server/disk). It does not take into
+            # account how many partitions a given tier wants to shed.
+            #
+            # If we did not do this, we could have a zone where, at some
+            # point during an assignment, number-of-parts-to-gain equals
+            # number-of-parts-to-shed. At that point, no further placement
+            # into that zone would occur since its parts_available_in_tier
+            # would be 0. This would happen any time a zone had any device
+            # with partitions to shed, which is any time a device is being
+            # removed, which is a pretty frequent operation.
+            wanted = max(dev['parts_wanted'], 0)
+            for tier in dev['tiers']:
+                parts_available_in_tier[tier] += wanted
 
         available_devs = \
-            sorted((d for d in self._iter_devs() if d['weight'] and d['disk_type'] != 'ssd'),
+            sorted((d for d in self._iter_devs() if d['weight']),
                    key=lambda x: x['sort_key'])
 
         tier2devs = defaultdict(list)
@@ -1385,8 +1358,7 @@ class RingBuilder(object):
 
         # Just to save memory and keep from accidental reuse.
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                del dev['sort_key']
+            del dev['sort_key']
 
     @staticmethod
     def _sort_key_for(dev):
@@ -1471,16 +1443,15 @@ class RingBuilder(object):
         weighted_replicas_for_dev = {}
         devices_with_room = []
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                if not dev['weight']:
-                    continue
-                weighted_replicas = (
-                    dev['weight'] * weight_of_one_part / self.parts)
-                if weighted_replicas < 1:
-                    devices_with_room.append(dev['id'])
-                else:
-                    weighted_replicas = 1
-                weighted_replicas_for_dev[dev['id']] = weighted_replicas
+            if not dev['weight']:
+                continue
+            weighted_replicas = (
+                dev['weight'] * weight_of_one_part / self.parts)
+            if weighted_replicas < 1:
+                devices_with_room.append(dev['id'])
+            else:
+                weighted_replicas = 1
+            weighted_replicas_for_dev[dev['id']] = weighted_replicas
 
         while True:
             remaining = self.replicas - sum(weighted_replicas_for_dev.values())
@@ -1496,14 +1467,13 @@ class RingBuilder(object):
 
         weighted_replicas_by_tier = defaultdict(float)
         for dev in self._iter_devs():
-            if dev['disk_type'] != 'ssd':
-                if not dev['weight']:
-                    continue
-                assigned_replicanths = weighted_replicas_for_dev[dev['id']]
-                dev_tier = (dev['region'], dev['zone'], dev['ip'], dev['id'])
-                for i in range(len(dev_tier) + 1):
-                    tier = dev_tier[:i]
-                    weighted_replicas_by_tier[tier] += assigned_replicanths
+            if not dev['weight']:
+                continue
+            assigned_replicanths = weighted_replicas_for_dev[dev['id']]
+            dev_tier = (dev['region'], dev['zone'], dev['ip'], dev['id'])
+            for i in range(len(dev_tier) + 1):
+                tier = dev_tier[:i]
+                weighted_replicas_by_tier[tier] += assigned_replicanths
 
         # belts & suspenders/paranoia -  at every level, the sum of
         # weighted_replicas should be very close to the total number of
@@ -1537,12 +1507,11 @@ class RingBuilder(object):
         # watch out for device limited tiers
         num_devices = defaultdict(int)
         for d in self._iter_devs():
-            if d['disk_type'] != 'ssd':
-                if d['weight'] <= 0:
-                    continue
-                for t in (d.get('tiers') or tiers_for_dev(d)):
-                    num_devices[t] += 1
-                num_devices[()] += 1
+            if d['weight'] <= 0:
+                continue
+            for t in (d.get('tiers') or tiers_for_dev(d)):
+                num_devices[t] += 1
+            num_devices[()] += 1
 
         tier2children = self._build_tier2children()
 
@@ -1739,14 +1708,13 @@ class RingBuilder(object):
                         'Ring Builder file is invalid: %s' % builder_file)
 
         if not hasattr(builder, 'devs'):
-            print("in not hasattr(builder,'devs')aidjoasdjaosij")
             builder_dict = builder
             builder = cls(1, 1, 1, **kwargs)
             builder.copy_from(builder_dict)
 
         if not hasattr(builder, '_id'):
             builder._id = None
-        print("Builder devs are {}".format(builder.devs))
+
         for dev in builder.devs:
             # really old rings didn't have meta keys
             if dev and 'meta' not in dev:
@@ -1772,7 +1740,6 @@ class RingBuilder(object):
             id_persisted = False
             self._id = uuid.uuid4().hex
         try:
-            print("The builder file is {}".format(builder_file))
             with open(builder_file, 'wb') as f:
                 pickle.dump(self.to_dict(), f, protocol=2)
         except Exception:
@@ -1867,8 +1834,7 @@ class RingBuilder(object):
         self._replica2part2dev = new_replica2part2dev
 
         for device in self._iter_devs():
-            if device['disk_type'] != 'ssd':
-                device['parts'] *= 2
+            device['parts'] *= 2
 
         # We need to update the time when a partition has been moved the last
         # time. Since this is an array of all partitions, we need to double it
